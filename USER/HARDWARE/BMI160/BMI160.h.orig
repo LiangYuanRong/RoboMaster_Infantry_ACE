@@ -1,0 +1,27 @@
+#ifndef __BMI160_H
+#define __BMI160_H
+
+
+#define USART2_RX_LEN 256
+
+typedef struct
+{
+    float Accel_X;  //转换成实际的X轴加速度，
+    float Accel_Y;  //转换成实际的Y轴加速度，
+    float Accel_Z;  //转换成实际的Z轴加速度，
+    float Temp;     //转换成实际的温度，单位为摄氏度
+    float Gyro_X;   //转换成实际的X轴角加速度，
+    float Gyro_Y;   //转换成实际的Y轴角加速度，
+    float Gyro_Z;   //转换成实际的Z轴角加速度
+		float yaw_angle;
+		float pitch_angle;
+	  float roll_angle;
+}BMI160_Data_Typedef;
+
+extern BMI160_Data_Typedef BMI160_Data;
+
+void BMI160_USART2_Configuration(void);
+void BMI_Data_Deal(void);
+
+
+#endif

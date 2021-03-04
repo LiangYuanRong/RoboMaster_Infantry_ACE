@@ -1,0 +1,380 @@
+#include "main.h"
+#include "Chassis_Task.h"
+#include "Remote_Task.h"
+#include "Speed_Def.h"
+#include "PID_Def.h"
+#include "Mode_Def.h"
+
+
+/**====底盘任务====**/
+int chassis_heart = 0;          //底盘任务心跳
+float Yaw_different_angle = 0.0f;  //Y轴与底盘的角度差
+/*堆栈剩余*/
+extern TaskHandle_t ChassisTask_Handler; // 栈大小
+int ChassisTask_water=0;
+
+void Chassis_Task(void *pvParameters)
+{
+	//加载时间
+  vTaskDelay(CHASSIS_TASK_INIT_TIME);
+
+
+	while(1)
+	{
+		chassis_heart =! chassis_heart;                                       //底盘任务心跳(仅用于debug观察是否进行任务)
+		ChassisTask_water = uxTaskGetStackHighWaterMark(ChassisTask_Handler);
+		LEDG2 = chassis_heart;
+		
+		Chassis_to_Gimbal();          //can2底盘发数据到云台
+		Yaw_different_angle = Get_Yaw_Different_Angle(&Yaw_Motor_Data);       //计算底盘与云台差角
+    Chassis_control();	                                                  //底盘控制
+
+		//系统延时
+    vTaskDelay(CHASSIS_CONTROL_TIME_MS);
+	}
+}
+
+
+/*底盘发送数据到云台（yaw轴电机换算码盘值，yaw轴电机速度值，遥控值）*/
+int send_sign = 0;              //顺序发送遥控值
+
+void Chassis_to_Gimbal(void)
+{ 
+  /*底盘发遥控数据到云台*/ 
+#ifdef board_chassis             
+	if(workStatus!=POWEROFF) //不加这句会导致云台一直接收不变的遥控值无法断开  RC_Ctl.rc.s2 != ALL_STOP && 
+	{  
+		if(send_sign==0)
+			{ 
+			if(RC_Ctl.rc.s2 == MOUSE_CONTROL && RC_Ctl.rc.s1 == 3)
+			  CAN2_Send_Data1_MK_To_Gimbal();
+			else
+				CAN2_Send_Data1_RC_To_Gimbal();
+		  send_sign=1;
+			}
+		if(send_sign==1){   
+			CAN2_Send_Data2_To_Gimbal();
+		  send_sign=0;}
+  }
+#endif	 
+} 
+	
+
+
+/**====底盘运动控制====**/
+int16_t chassis_input[4] =  {0};                     //底盘电机处理输入
+int16_t chassis_output[4] = {0};                     //底盘电机处理输出
+float Chassis_ch0=0.0f, Chassis_ch1=0.0f, Chassis_ch2=0.0f ;  //底盘电机受控量
+
+void Chassis_control(void)//底盘模式控制
+{
+	/*不同底盘模式对底盘输入做不同处理*/
+	if(INITIALIZE_flag == 1)
+	{
+			if(chassis_workStatus == FOLLOWING)
+			{
+				Chassis_Follow();	//跟随
+			}
+			if(chassis_workStatus == TWIST_WAIST)
+			{
+				Chassis_Twist();  //扭腰
+			}
+			if(chassis_workStatus == ROTATION)
+			{
+				Chassis_Rotation();//小陀螺
+			}	
+			if(chassis_workStatus == INDEPENDENT)
+			{
+				Chassis_Independent();//底盘不跟随
+			}	
+	
+	}
+	if(chassis_workStatus == STOP || INITIALIZE_flag == 0)
+	{
+		Chassis_Input(0,0,0);//停止
+	}
+	
+}
+
+
+
+/*====底盘跟随状态控制====*/
+int chassis_time=0;
+void Chassis_Follow(void)
+{
+	Chassis_ch2 = Yaw_different_angle;//Angle_Limiting_Int32(Yaw_Motor_Data.actual_Position, 1, 8192);//临角处理   
+	
+	CHASSIS_ROTATE_FOLLOW_PID.SetValue = Chassis_ch2;       //旋转跟随低pid
+	
+	Chassis_ch2 = Location_Pid_Int32(&CHASSIS_ROTATE_FOLLOW_PID,0);	  //底盘在原地旋转时用弱跟随PID
+	
+	Chassis_Input(Remote_data.RC_ch0, Remote_data.RC_ch1, Chassis_ch2);
+}	
+
+
+
+/*===底盘扭腰状态控制=====*/
+static int16_t TWIST_FLAG=0;  //0,左转；1，右转
+void Chassis_Twist(void)
+{
+	/*判断转向*/
+	if(Yaw_different_angle>20 && TWIST_FLAG==1)
+	{
+		TWIST_FLAG = 0;
+	}
+	else if(Yaw_different_angle<-20 && TWIST_FLAG==0)
+	{
+		TWIST_FLAG = 1;		
+	}
+	
+	/*转动控制*/
+	 if(TWIST_FLAG == 0)//左角度大于30，向左转
+	 {
+			//*开环固定扭速
+			Chassis_ch2 = CHASSIS_TWIST_SPEED;      
+			
+			//*扭腰移动算法：云台为主坐标轴，目标值分解到底盘坐标轴
+			 if(Remote_data.RC_ch1||Remote_data.RC_ch0)
+				{ 
+					Chassis_ch1=cos(Yaw_different_angle/180*PI)*Remote_data.RC_ch1;//需要用弧度单位计算
+					Chassis_ch0=-sin(Yaw_different_angle/180*PI)*Remote_data.RC_ch1;
+					if(Remote_data.RC_ch0)
+					{
+						Chassis_ch1+=sin(Yaw_different_angle/180*PI)*Remote_data.RC_ch0;
+						Chassis_ch0+=cos(Yaw_different_angle/180*PI)*Remote_data.RC_ch0;
+					}
+				}
+		}
+	 else if(TWIST_FLAG == 1)//右角度小于负30，向右转
+	 {
+			//*开环固定扭速 
+			Chassis_ch2 = -CHASSIS_TWIST_SPEED;      
+			
+			//*扭腰移动算法：云台为主坐标轴，目标值分解到底盘坐标轴
+			 if(Remote_data.RC_ch1||Remote_data.RC_ch0)
+				{ 
+					Chassis_ch1=cos(Yaw_different_angle/180*PI)*Remote_data.RC_ch1;//需要用弧度单位计算
+					Chassis_ch0=-sin(Yaw_different_angle/180*PI)*Remote_data.RC_ch1;
+					if(Remote_data.RC_ch0)
+					{
+						Chassis_ch1+=sin(Yaw_different_angle/180*PI)*Remote_data.RC_ch0;
+						Chassis_ch0+=cos(Yaw_different_angle/180*PI)*Remote_data.RC_ch0;
+					}
+				}		 
+	 }
+   else
+	 {
+		 Chassis_ch0 = 0;
+		 Chassis_ch1 = 0;
+		 Chassis_ch2 = 0;
+	 }		 
+		
+	/*传入值处理*/
+	Chassis_Input(Chassis_ch0*2, Chassis_ch1*2, Chassis_ch2); 
+}
+
+
+/*=====底盘小陀螺状态控制======*/
+void Chassis_Rotation(void)
+{  
+	//*小陀螺旋转移动算法：云台为主坐标轴，目标值分解到底盘坐标轴
+	 if(Remote_data.RC_ch1||Remote_data.RC_ch0)  //此时有移动
+		{ 
+			Chassis_ch2 = CHASSIS_ROTATION_MOVE_SPEED;//小陀螺移动时减速
+			
+			Chassis_ch1=cos(Yaw_different_angle/180*PI)*Remote_data.RC_ch1;  //需要用弧度单位计算
+			Chassis_ch0=-sin(Yaw_different_angle/180*PI)*Remote_data.RC_ch1;
+		  if(Remote_data.RC_ch0)
+			{
+				Chassis_ch1+=sin(Yaw_different_angle/180*PI)*Remote_data.RC_ch0;
+				Chassis_ch0+=cos(Yaw_different_angle/180*PI)*Remote_data.RC_ch0;
+			}
+		}
+		else  //原地转快速
+		{
+	//*开环固定转速
+	    Chassis_ch2 = CHASSIS_ROTATION_SPEED;//（左正右负）    
+		}
+		
+	//*传入值处理	
+	Chassis_Input(Chassis_ch0*2, Chassis_ch1*2, Chassis_ch2); 
+} 
+
+
+/*======底盘不跟随状态控制========*/
+void Chassis_Independent(void) 
+{
+	//*云底分离移动算法：云台为主坐标轴，目标值分解到底盘坐标轴（与小陀螺一样）
+	 if(Remote_data.RC_ch1||Remote_data.RC_ch0)
+		{ 
+			Chassis_ch1=cos(Yaw_different_angle/180*PI)*Remote_data.RC_ch1;//需要用弧度单位计算
+			Chassis_ch0=-sin(Yaw_different_angle/180*PI)*Remote_data.RC_ch1;
+		  if(Remote_data.RC_ch0)
+			{
+				Chassis_ch1+=sin(Yaw_different_angle/180*PI)*Remote_data.RC_ch0;
+				Chassis_ch0+=cos(Yaw_different_angle/180*PI)*Remote_data.RC_ch0;
+			}
+		}
+		
+	//*传入值处理	
+	Chassis_Input(Chassis_ch0, Chassis_ch1, 0);	
+}
+
+
+
+
+/*====底盘输入数据处理====*/
+int32_t Sum_output=0;       //输出值求和（功率限制用）
+first_order_low_filter_type_t  Chassis_ForwardBack_LowFilt_Data = {0.0f,0.0f,0.0f,Chassis_Fir_Ord_Low_Fil_Param}; //低通前后控制量
+first_order_low_filter_type_t  Chassis_LeftRight_LowFilt_Data   = {0.0f,0.0f,0.0f,Chassis_Fir_Ord_Low_Fil_Param}; //低通左右控制量
+
+int16_t filt_ch0=0,filt_ch1=0;
+int16_t test_ch0=0,test_ch1=0;
+
+int16_t SPEED_GAIN = 0;
+
+void Chassis_Input(int16_t ch0, int16_t ch1, int16_t ch2)
+{	
+
+/*加速度限制*/	
+	Chassis_accelerated_Control(&ch0,&ch1,&ch2);
+	test_ch0 = ch0;
+	test_ch1 = ch1;
+	filt_ch0 = First_Order_Low_Filter(&Chassis_LeftRight_LowFilt_Data   , ch0); //左右控制量低通滤波
+	filt_ch1 = First_Order_Low_Filter(&Chassis_ForwardBack_LowFilt_Data , ch1); //前后控制量低通滤波
+	
+
+	
+/*对电机输出量处理*/
+	if(workStatus==POWEROFF || workStatus==INITIALIZE ) //关电或初始化阶段
+	{
+		chassis_input[0] = 0;
+		chassis_input[1] = 0;
+		chassis_input[2] = 0;
+		chassis_input[3] = 0;
+	}
+	else
+	{
+		if(chassis_workStatus==FOLLOWING)  //跟随
+		{
+			//麦轮运动学
+			//正常行驶速度增益
+			chassis_input[0] = (-(filt_ch1  + ch2 - filt_ch0))*CHASSIS_SPEED_GAIN;
+		  chassis_input[1] = (filt_ch1 - ch2 + filt_ch0)   *CHASSIS_SPEED_GAIN;
+		  chassis_input[2] = (-(filt_ch1 + ch2 + filt_ch0))*CHASSIS_SPEED_GAIN;
+		  chassis_input[3] = (filt_ch1 - ch2 - filt_ch0)   *CHASSIS_SPEED_GAIN;
+			
+			SPEED_GAIN = CHASSIS_SPEED_GAIN;
+		}
+		if(chassis_workStatus==ROTATION||chassis_workStatus==TWIST_WAIST||chassis_workStatus==INDEPENDENT)  //小陀螺,扭腰，底盘不跟随
+		{
+			//麦轮运动学
+			//特殊模式行驶速度增益
+			chassis_input[0] = (-(filt_ch1 + ch2 - filt_ch0))*TWIST_SPEED_GAIN;
+		  chassis_input[1] = (filt_ch1 - ch2 + filt_ch0)   *TWIST_SPEED_GAIN;
+		  chassis_input[2] = (-(filt_ch1 + ch2 + filt_ch0))*TWIST_SPEED_GAIN;
+		  chassis_input[3] = (filt_ch1 - ch2 - filt_ch0)   *TWIST_SPEED_GAIN;
+			
+			SPEED_GAIN = TWIST_SPEED_GAIN;
+		}
+		if(chassis_workStatus==STOP)       //停止
+		{
+		  chassis_input[0] = 0;
+		  chassis_input[1] = 0;
+		  chassis_input[2] = 0;
+		  chassis_input[3] = 0;			
+		}
+	}
+			 
+/*电机速度闭环处理*/
+	chassis_output[0]=Rmmotor_Speed_control(&CHASSIS_1_S_PID,chassis_input[0],Chassis_Motor[0].speed,M3508_MAX_OUTPUT_CURRENT);
+	chassis_output[1]=Rmmotor_Speed_control(&CHASSIS_2_S_PID,chassis_input[1],Chassis_Motor[1].speed,M3508_MAX_OUTPUT_CURRENT);
+	chassis_output[2]=Rmmotor_Speed_control(&CHASSIS_3_S_PID,chassis_input[2],Chassis_Motor[2].speed,M3508_MAX_OUTPUT_CURRENT);
+	chassis_output[3]=Rmmotor_Speed_control(&CHASSIS_4_S_PID,chassis_input[3],Chassis_Motor[3].speed,M3508_MAX_OUTPUT_CURRENT);
+
+/*防止运动轨迹失真*/	
+	Keep_Driv_Track(&chassis_output[0] ,&chassis_output[0] ,&chassis_output[0] ,&chassis_output[0] ,14);
+	 
+	
+/*底盘功率限制*/
+#ifdef power_limit
+	
+	Power_Deal();    //实时功率缓存获取（防失真）
+	if(PowerLimit.RemainPower[2]<PowerLimit_Thres && PowerLimit.RemainPower[2]>8)  //不等0防止裁判系统数据传输空
+	{
+    PowerLimit.SumOutValue = abs(chassis_output[0])+ abs(chassis_output[1])+ abs(chassis_output[2])+ abs(chassis_output[3]);
+    PowerLimit.LimitOutValue = PowerLimit.RemainPower[2] * PowerLimit.RemainPower[2] * PowerLimit_Param ;      //缓冲功率平方和乘功率限制系数
+		//将电机输出值进行比例分配
+		chassis_output[0] = PowerLimit.LimitOutValue * chassis_output[0] / PowerLimit.SumOutValue;
+		chassis_output[1] = PowerLimit.LimitOutValue * chassis_output[1] / PowerLimit.SumOutValue;
+		chassis_output[2] = PowerLimit.LimitOutValue * chassis_output[2] / PowerLimit.SumOutValue;
+		chassis_output[3] = PowerLimit.LimitOutValue * chassis_output[3] / PowerLimit.SumOutValue;
+	}
+	else if(PowerLimit.RemainPower[2] <=8 && PowerLimit.RemainPower[2]!=0)
+  {
+		chassis_output[0] = 0;
+		chassis_output[1] = 0;
+		chassis_output[2] = 0;
+		chassis_output[3] = 0;		
+	}
+#endif
+ 
+	
+/*输出电机*/
+#ifdef chassis_work
+  #ifdef board_chassis  //只有底盘板启动底盘工作才能发送can
+     CAN1_SendCommand_Chassis(chassis_output[0],chassis_output[1],chassis_output[2],chassis_output[3]);
+	#endif  
+#else	 
+	   CAN1_SendCommand_Chassis(0,0,0,0);
+#endif
+	
+}
+
+
+
+/*==底盘加速度限制斜坡函数==*/
+void Chassis_accelerated_Control(int16_t *ch0,int16_t *ch1,int16_t *ch2)				
+{
+	static int16_t last_ch[3] = {0,0,0};
+	int16_t temp[3];
+	
+	temp[0] = *ch0 - last_ch[0];
+	temp[1] = *ch1 - last_ch[1];
+	temp[2] = *ch2 - last_ch[2];
+	
+	if(RC_Ctl.rc.s2 == RC_CONTROL)													//遥控模式
+	{
+		if(abs_float(temp[0]) > TRANSLATION_ACCELERAD)
+			*ch0 = last_ch[0] + temp[0]/abs_float(temp[0])*TRANSLATION_ACCELERAD;
+		if(abs_float(temp[1]) > STRAIGHT_ACCELERAD)
+			*ch1 = last_ch[1] + temp[1]/abs_float(temp[1])*STRAIGHT_ACCELERAD;
+		
+		if(chassis_workStatus==TWIST_WAIST||chassis_workStatus==ROTATION)         //扭腰模式下才用旋转加速度限制
+		{
+			if(abs_float(temp[2]) > ROTATING_ACCELERAD)
+				*ch2 = last_ch[2] + temp[2]/abs_float(temp[2])*ROTATING_ACCELERAD;
+	  }
+	}
+	if(RC_Ctl.rc.s2 == MOUSE_CONTROL)												//键盘模式
+	{
+		if(abs_float(temp[0]) > TRANSLATION_ACCELERAD)
+			*ch0 = last_ch[0] + temp[0]/abs_float(temp[0])*TRANSLATION_ACCELERAD;
+		if(abs_float(temp[1]) > STRAIGHT_ACCELERAD)
+			*ch1 = last_ch[1] + temp[1]/abs_float(temp[1])*STRAIGHT_ACCELERAD;
+		
+		if(chassis_workStatus==TWIST_WAIST)                   //扭腰模式下才用旋转加速度限制
+		{
+			if(abs_float(temp[2]) > ROTATING_ACCELERAD)
+				*ch2 = last_ch[2] + temp[2]/abs_float(temp[2])*ROTATING_ACCELERAD;
+	  }
+	}
+	last_ch[0] = *ch0;	
+	last_ch[1] = *ch1;
+	last_ch[2] = *ch2;
+	
+}
+
+
+
+

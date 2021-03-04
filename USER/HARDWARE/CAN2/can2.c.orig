@@ -1,0 +1,71 @@
+#include "can2.h"
+#include "stm32f4xx.h"
+#include "main.h"
+
+void CAN2_Configuration(void)
+{
+    CAN_InitTypeDef        CAN_Init2;
+    CAN_FilterInitTypeDef  CAN_Filter2;
+    GPIO_InitTypeDef       GPIO_Init_can2;
+		NVIC_InitTypeDef       NVIC_Init_can2;                  //定义结构体
+
+    RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOB, ENABLE);		//打开GPIO时钟
+    RCC_APB1PeriphClockCmd(RCC_APB1Periph_CAN2, ENABLE);    //打开can1时钟
+
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource12, GPIO_AF_CAN2);	//配置引脚复用功能
+    GPIO_PinAFConfig(GPIOB, GPIO_PinSource13, GPIO_AF_CAN2);  //配置引脚复用功能
+
+    GPIO_Init_can2.GPIO_Pin = GPIO_Pin_12 | GPIO_Pin_13;
+    GPIO_Init_can2.GPIO_Mode = GPIO_Mode_AF;								  //复用推挽输出
+    GPIO_Init_can2.GPIO_OType=  GPIO_OType_PP;
+		GPIO_Init_can2.GPIO_Speed = GPIO_Speed_100MHz;
+		GPIO_Init_can2.GPIO_PuPd = GPIO_PuPd_UP;
+		GPIO_Init(GPIOB, &GPIO_Init_can2);
+    //CAN总线io口配置 
+		NVIC_Init_can2.NVIC_IRQChannel = CAN2_RX0_IRQn;					//中断配置 
+		NVIC_Init_can2.NVIC_IRQChannelPreemptionPriority = 1;           //抢占优先级 1
+		NVIC_Init_can2.NVIC_IRQChannelSubPriority = 2;                  //响应优先级 0
+		NVIC_Init_can2.NVIC_IRQChannelCmd = ENABLE;
+		NVIC_Init(&NVIC_Init_can2);
+
+    CAN_DeInit(CAN2);                        //将外围寄存器初始化到它们的默认重置值
+    CAN_StructInit(&CAN_Init2);      //用它的默认值填充每个CAN_InitStructure成员
+    //CAN总线的配置
+    CAN_Init2.CAN_TTCM = DISABLE;			      //非时间触发通信模式
+    CAN_Init2.CAN_ABOM = DISABLE;			      //软件自动离线管理模式
+    CAN_Init2.CAN_AWUM = DISABLE;			      //自动唤醒模式，睡眠模式通过软件唤醒(清除CAN->MCR的SLEEP位)
+    CAN_Init2.CAN_NART = DISABLE;			      //非自动重传输模式，禁止报文自动传送 
+    CAN_Init2.CAN_RFLM = DISABLE;			      //接收FIFO锁定模式，报文不锁定,新的覆盖旧的 
+    CAN_Init2.CAN_TXFP = ENABLE;			      //发送FIFO优先迹，优先级由报文标识符决定 
+    CAN_Init2.CAN_Mode = CAN_Mode_Normal;		//模式设置： mode:0,普通模式;1,回环模式;
+    CAN_Init2.CAN_SJW  = CAN_SJW_1tq;
+    CAN_Init2.CAN_BS1 = CAN_BS2_5tq;
+    CAN_Init2.CAN_BS2 = CAN_BS1_8tq;
+    CAN_Init2.CAN_Prescaler = 3;   //CAN BaudRate 42/(1+5+8)/3=1Mbps  (电机的can波特率为1m)
+    CAN_Init(CAN2, &CAN_Init2);
+		//CAN总线的过滤配置(接收配置)
+    CAN_Filter2.CAN_FilterNumber=14;                  //过滤器 0
+    CAN_Filter2.CAN_FilterMode=CAN_FilterMode_IdMask;
+    CAN_Filter2.CAN_FilterScale=CAN_FilterScale_32bit;
+    CAN_Filter2.CAN_FilterIdHigh=0x0000;
+    CAN_Filter2.CAN_FilterIdLow=0x0000;
+    CAN_Filter2.CAN_FilterMaskIdHigh=0x0000;
+    CAN_Filter2.CAN_FilterMaskIdLow=0x0000;
+    CAN_Filter2.CAN_FilterFIFOAssignment=0;
+    CAN_Filter2.CAN_FilterActivation=ENABLE;
+    CAN_FilterInit(&CAN_Filter2);			//滤波器初始化   
+
+		CAN_ITConfig(CAN2,CAN_IT_FMP0,ENABLE);		//接收中断    启用或禁用指定的CANx中断    CAN_IT_FMP0:等待中断的FIFO 0消息	
+}
+
+void CAN2_RX0_IRQHandler(void)
+{
+	CanRxMsg rx_message;
+	if (CAN_GetITStatus(CAN2,CAN_IT_FMP0)!= RESET) 
+	{
+		CAN_ClearITPendingBit(CAN1, CAN_IT_FMP0);		
+		CAN_ClearFlag(CAN1, CAN_FLAG_FF0); 
+    CAN_Receive(CAN1, CAN_FIFO0, &rx_message);		
+  }
+}
+

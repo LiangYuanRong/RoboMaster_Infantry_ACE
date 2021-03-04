@@ -1,0 +1,544 @@
+#include "main.h"
+#include "Gimbal_Task.h"
+#include "Remote_Task.h"
+#include "Speed_Def.h"
+#include "PID_Def.h"
+#include "Mode_Def.h"
+#include "Gyro_Task.h"
+#include "Double_Gimbal.h"
+
+
+
+/**====云台任务====**/
+int gimbal_heart=0;   //云台任务心跳
+/*堆栈剩余*/
+extern TaskHandle_t GimbalTask_Handler; // 栈大小
+int GimbalTask_water=0;
+
+void Gimbal_Task(void *pvParameters)
+{
+  vTaskDelay(GIMBAL_TASK_INIT_TIME);	
+	
+	while(1)
+	{
+		gimbal_heart = !gimbal_heart;    //云台任务心跳
+		GimbalTask_water = uxTaskGetStackHighWaterMark(GimbalTask_Handler);//检测剩余堆栈
+		LEDG3 = gimbal_heart;
+
+    Gimbal_Control();                //云台工作
+		
+		//系统延时
+    vTaskDelay(GIMBAL_CONTROL_TIME_MS);
+	}
+}
+
+
+
+
+
+/**====云台状态控制====**/
+int16_t gimbal_output[2] = {0,0}; //云台电机处理输出    0:P轴电机   1：Y轴电机
+int gimbal_work_mode=0;           //云台状态切换控制量处理标志位
+extern int16_t GD_output ;        //供弹电机输出
+int8_t YAW_ZERO_FLAG = 0;      //yaw轴中值光电标志
+
+void Gimbal_Control(void)
+{
+	
+	Get_PitchRollYaw();                       //mpu6500获取姿态角
+
+#ifdef board_gimbal
+	YAW_ZERO_FLAG = !Yaw_Zero_Value();         //实时监测中值光电
+	MiniPC_Data_Deal();                       //小电脑传回数据处理
+	CAN2_Send_Yaw_Data_To_Chassis();          //云台数据发送给底盘
+	BMI_Data_Deal();                          //外接陀螺仪(双云台)
+#endif
+	
+	Correct_Yaw_Zero();                        //yaw轴码盘修正
+	
+	if(workStatus == INITIALIZE)
+	{ 
+		gimbal_work_mode=0;
+		Gimbal_Init();         //云台初始化
+	}
+	
+#ifdef board_gimbal
+	else if(workStatus == AUTOATTACK)
+	{
+		Gimbal_Auto();         //云台自动打击
+	}
+	else if(workStatus == AUTOBUFF)  
+	{ 
+		Gimbal_Buff();         //云台大风车模式
+	}
+	else if(workStatus == REPLENISHMEN)
+	{
+		gimbal_work_mode=0;		
+		Gimbal_Supply();       //云台补给模式
+	}
+	else if(workStatus == WORKING)
+	{
+			if(chassis_workStatus==INDEPENDENT)
+			{
+				Gimbal_Independent();
+			}
+			else
+			{			
+			  Gimbal_Work();         //云台正常工作
+			}
+		}
+	else
+	{
+		gimbal_work_mode=0;		
+		Gimbal_Stop();         //停止
+	}
+#endif
+
+	
+/*输出云台电机*/
+#ifdef gimbal_work
+	
+  #ifdef board_gimbal      //只有云台板和启动云台工作时才能控制PY轴
+	   CAN1_SendCommand_Gimbal_Pitch(gimbal_output[0]);       //can2控制P轴
+	   Second_Gimbal_Control(second_gimbal.yaw_contral_data , second_gimbal.pitch_contral_data); //副云台控制
+	#endif 
+
+	#ifdef board_chassis
+     CAN1_SendCommand_Gimbal_Fire(gimbal_output[1],0,GD_output);   //can1控制Y轴供弹	
+	#endif
+	
+#else	   
+	   CAN1_SendCommand_Gimbal_Fire(0,0,0);
+#endif
+	
+}	
+
+
+
+
+
+/*===================================云台初始化==============================*/
+static int16_t yaw_init_success=0;    //Y轴初始化成功标志
+static int16_t pitch_init_success=0;  //P轴初始化成功标志
+int INITIALIZE_flag=0;         //发送给底盘的初始化成功标志
+
+//云台初始程序
+void Gimbal_Init()
+{
+#ifdef board_gimbal		
+//  Yaw_Init();   //Y轴初始化
+//	Pitch_Init(); //P轴初始化
+
+//直接初始化，看需要加，不用直接去注释即可
+		yaw_init_success   = 1;
+  	pitch_init_success = 1;
+#else   //底盘默认初始化成功
+ 		yaw_init_success   = 1;
+  	pitch_init_success = 1; 	
+#endif
+	
+	if(yaw_init_success==1 && pitch_init_success==1)
+	{
+		yaw_init_success   = 0;
+		pitch_init_success = 0;
+		INITIALIZE_flag = 1;
+		workStatus = WORKING;   //开始运行
+	}
+}
+
+
+
+//Yaw轴初始化
+static int16_t yaw_init_error = 0;   //Y轴初始化累失败次数
+static int16_t yaw_init_count = 0;   //Y轴初始化云台归中消抖计数
+   
+void Yaw_Init(void)
+{ 
+	gimbal_output[1] = Motor_Position_Speed_Control(&GIMBAL_S_YAW_PID , &GIMBAL_P_YAW_PID , Yaw_Motor_Data.actual_Position , Yaw_Motor_Data.speed , 0 , YAW_OUTPUT_LIMIT);
+	  
+	if(yaw_init_success == 0)  //Y轴初始化未成功，达到一定时间强行初始化成功
+	{
+		if(abs(Yaw_Middle_Angle - Yaw_Motor_Data.position) < 10)  //码盘接近中值
+		{
+			if(yaw_init_count >= 50) //初始化消抖
+			 { 
+				 yaw_init_success = 1;  
+			   yaw_init_count   = 0; //复位
+				 yaw_init_error   = 0;
+			 }
+			 else
+			 {
+				 yaw_init_count++;     //成功次数累加
+			 }
+		}
+		else
+		{
+			yaw_init_error++;        //初始化失败记录
+		}
+		
+		if(yaw_init_error == 1500) //多次初始化失败，强制初始化成功
+		{
+			 yaw_init_success = 1;  
+			 yaw_init_count   = 0;   //复位
+			 yaw_init_error   = 0;			
+		}
+	} 		
+
+}
+ 	
+//Pitch轴初始化  （因为没有绝对值码盘，应该先上下到达限位记录后再归中）
+static int16_t pitch_init_error = 0;   //P轴初始化累失败次数
+static int16_t pitch_init_count = 0;   //P轴初始化云台归中消抖计数
+
+void Pitch_Init(void)
+{
+	if(pitch_init_success == 0) 
+	{
+		//位置环目标值为0
+		 gimbal_output[0] = Motor_Position_Speed_Control(&GIMBAL_S_PITCH_PID , &GIMBAL_P_PITCH_PID , Pitch_Motor_Data.actual_Position , Pitch_Motor_Data.speed , 0 , 700); 
+		
+		if(abs(Pitch_Middle_Angle - Pitch_Motor_Data.position) < 10)  //码盘接近中值
+		{
+			if(pitch_init_count >= 50) //初始化消抖
+			 { 
+				 pitch_init_success = 1;  
+			   pitch_init_count   = 0; //复位
+				 pitch_init_error   = 0;
+			 }
+			 else
+			 {
+				 pitch_init_count++;     //成功次数累加
+			 }
+		}
+		else
+		{
+			pitch_init_error++;        //初始化失败记录
+		}
+		
+		if(pitch_init_error == 1500) //多次初始化失败，强制初始化成功
+		{
+			 pitch_init_success = 1;  
+			 pitch_init_count   = 0;   //复位
+			 pitch_init_error   = 0;			
+		}
+    
+  }
+}
+
+/*==============================云台补给============================*/
+int16_t GIMBAL_SUPPLY_FLAG = 0; //补给状态标志位(0:归中状态，进入补给状态  1:云台90度转动中  2:到达指定位置  3:)
+float Gimbal_supply_angle = 0;//补给时角度
+
+void Gimbal_Supply()
+{
+	/*进入补给模式*/
+	if(GIMBAL_SUPPLY_FLAG==0)
+	{
+		Gimbal_supply_angle = BMI160_Data_Gimbal_first.yaw_angle + 90.0f;  //补给时目标角度为90度
+	  GIMBAL_SUPPLY_FLAG = 1;                               //进入补给状态
+	}
+	/*到补给角度*/
+	else if(GIMBAL_SUPPLY_FLAG==1)  
+	{
+	  gimbal_output[1] = Motor_Position_Speed_Control(&GIMBAL_S_YAW_PID , &GIMBAL_P_YAW_PID , 0 , Yaw_Motor_Data.speed, (-Gimbal_supply_angle-(YAW_ANGLE_FLAG*BMI160_Data_Gimbal_first.yaw_angle)) , YAW_OUTPUT_LIMIT);//Yaw位置控制 	
+	  if(abs_float(BMI160_Data_Gimbal_first.yaw_angle - Gimbal_supply_angle) <= 3) //到达指定位置
+		{
+			GIMBAL_SUPPLY_FLAG = 2;
+		  Gimbal_supply_angle = BMI160_Data_Gimbal_first.yaw_angle - 90.0f;  //归中时目标角度为-90度			
+		}
+	}
+	/*返回中间角*/
+	else if(GIMBAL_SUPPLY_FLAG==3)//（到位前提按下按键）
+	{
+	  gimbal_output[1] = Motor_Position_Speed_Control(&GIMBAL_S_YAW_PID , &GIMBAL_P_YAW_PID , 0 , Yaw_Motor_Data.speed, (-Gimbal_supply_angle-(YAW_ANGLE_FLAG*BMI160_Data_Gimbal_first.yaw_angle)) , YAW_OUTPUT_LIMIT);//Yaw位置控制 			
+	  if(abs_float(BMI160_Data_Gimbal_first.yaw_angle - Gimbal_supply_angle) <= 3) //到达指定位置
+		{
+			GIMBAL_SUPPLY_FLAG = 4;
+		}	  
+	}
+}
+
+
+
+/*===============================云台正常控制========================*/
+int16_t yaw_different_angle=0;
+float Gimbal_yaw_angle=0.0f;
+float Last_Gimbal_yaw_angle=0.0f;
+
+first_order_low_filter_type_t  Gimbal_Updown_LowFilt_Pitch_Data = {0.0f,0.0f,0.0f,Gimbal_Pitch_Fir_Ord_Low_Fil_Param};       //低通俯仰控制量
+first_order_low_filter_type_t  Gimbal_Updown_LowFilt_Yaw_Data = {0.0f,0.0f,0.0f,Gimbal_Yaw_Fir_Ord_Low_Fil_Param};           //低通偏航控制量
+first_order_low_filter_type_t  Gimbal_Updown_LowFilt_Remote_data = {0.0f,0.0f,0.0f,Gimbal_Remote_Fir_Ord_Low_Fil_Param};     //低通遥控量
+
+acceleration_control_type_t    Gimbal_Pitch_acc_limit_Data  = {0,0,0,0,GIMBAL_PITCH_ACCELERAD};  //P轴加速度限制                        
+
+int16_t pitch_filt_output=0;   //P轴滤波值
+int16_t yaw_filt_output=0;     //Y轴滤波值
+int16_t remote_ch3_filt_output=0;     //遥控滤波值
+
+int16_t pitch_real_jscope=0;   //P轴打印实际曲线
+int16_t pitch_set_jscope=0;    //P轴打印设定曲线
+
+void Gimbal_Work()
+{
+	if(gimbal_work_mode != 1) //使用云台控制时刷新出来一个角度（防止切换模式角度变化）
+	{
+		Gimbal_yaw_angle=0;
+		Last_Gimbal_yaw_angle = BMI160_Data_Gimbal_first.yaw_angle;                                               //主yaw_angle;
+		second_gimbal.last_second_yaw_angle = BMI160_Data_Gimbal_second.yaw_angle; //副yaw_angle;
+		gimbal_work_mode = 1;
+	}
+  Gimbal_yaw_angle = BMI160_Data_Gimbal_first.yaw_angle/*yaw_angle*/-Last_Gimbal_yaw_angle;                   //获取主云台正常工作时的陀螺仪Y轴角度
+	second_gimbal.second_yaw_angle = BMI160_Data_Gimbal_second.yaw_angle - second_gimbal.last_second_yaw_angle; //获取副云台正常工作时的陀螺仪Y轴角度
+	
+ 	Gimbal_Angle_Limit();                                                                                       //云台角度限制
+
+	/*主云台控制*/
+  gimbal_output[0] = Motor_Position_Speed_Control(&GIMBAL_S_PITCH_PID , &GIMBAL_P_PITCH_PID , 0 , /*PITCH_GYRO_ANGULAR_SPEED*/Pitch_Motor_Data.speed , -((Remote_data.RC_ch3)-(Pitch_Motor_Data.actual_Position*360/1024)) , PITCH_OUTPUT_LIMIT); //-(Remote_data.RC_ch3-(Pitch_Motor_Data.actual_Position*360/1024))
+	gimbal_output[1] = Motor_Position_Speed_Control(&GIMBAL_S_YAW_PID , &GIMBAL_P_YAW_PID , 0 , /*(-YAW_GYRO_ANGULAR_SPEED)*/Yaw_Motor_Data.speed, (-Remote_data.RC_ch2-(YAW_ANGLE_FLAG*Gimbal_yaw_angle)) , YAW_OUTPUT_LIMIT);                     //Yaw位置控制
+
+  /*副云台控制*/
+	second_gimbal.pitch_contral_data = Motor_Position_Speed_Control(&GIMBAL_DOUBLE_S_PITCH_PID , &GIMBAL_DOUBLE_P_PITCH_PID , 0 , BMI160_Data_Gimbal_second.Gyro_Y , gimbal_output[0]*0.01 , 50);                                                    //副云台P轴闭环（跟随主云台）（注意符号调节以及控制参数选择）
+	second_gimbal.yaw_contral_data   = Motor_Position_Speed_Control(&GIMBAL_DOUBLE_S_YAW_PID   , &GIMBAL_DOUBLE_P_YAW_PID   , 0 , BMI160_Data_Gimbal_second.Gyro_Z , (Gimbal_yaw_angle-second_gimbal.second_yaw_angle) , 50);                        //副云台Y轴闭环（跟随主云台）（注意符号调节以及控制参数选择）
+	
+	/*低通滤波*/
+	remote_ch3_filt_output = First_Order_Low_Filter(&Gimbal_Updown_LowFilt_Remote_data , -(Remote_data.RC_ch3-(Pitch_Motor_Data.actual_Position*360/1024))); //Y轴输出量低通滤波  
+	yaw_filt_output = First_Order_Low_Filter(&Gimbal_Updown_LowFilt_Yaw_Data , gimbal_output[1]);                                                            //Y轴输出量低通滤波
+	pitch_filt_output = First_Order_Low_Filter(&Gimbal_Updown_LowFilt_Pitch_Data , gimbal_output[0]);                                                        //P轴输出量低通滤波
+  pitch_filt_output = Motion_acceleration_control(&Gimbal_Pitch_acc_limit_Data , pitch_filt_output);                                                       //P轴加速度限制
+	
+	/*打印曲线*/
+	pitch_real_jscope = gimbal_output[0];               
+  pitch_set_jscope = (Pitch_Motor_Data.actual_Position*360/1024); 
+	
+  gimbal_output[1] = yaw_filt_output;	
+  gimbal_output[0] = pitch_filt_output;
+}
+
+
+
+/*==============================炮台模式云台==========================*/
+void Gimbal_Independent()
+{
+	if(gimbal_work_mode != 1) //使用云台控制时刷新出来一个角度（防止切换模式角度变化）
+	{
+		Gimbal_yaw_angle=0;
+		Last_Gimbal_yaw_angle = BMI160_Data_Gimbal_first.yaw_angle;//yaw_angle;
+		gimbal_work_mode = 1;
+	}
+  Gimbal_yaw_angle = BMI160_Data_Gimbal_first.yaw_angle-Last_Gimbal_yaw_angle;                                //获取主云台正常工作时的陀螺仪Y轴角度
+	
+ 	Gimbal_Angle_Limit();                                                   //云台角度限制
+
+  /*主云台控制*/
+  gimbal_output[0] = Motor_Position_Speed_Control(&GIMBAL_S_PITCH_PID , &GIMBAL_P_PITCH_PID , 0 , Pitch_Motor_Data.speed , -((Remote_data.RC_ch3)-(Pitch_Motor_Data.actual_Position*360/1024)) , PITCH_OUTPUT_LIMIT); //-(Remote_data.RC_ch3-(Pitch_Motor_Data.actual_Position*360/1024))
+	gimbal_output[1] = Motor_Position_Speed_Control(&GIMBAL_INDEPENDENT_S_YAW_PID , &GIMBAL_INDEPENDENT_P_YAW_PID , 0 , Yaw_Motor_Data.speed , (-Remote_data.RC_ch2-(YAW_ANGLE_FLAG*Gimbal_yaw_angle)) , YAW_OUTPUT_LIMIT);//Yaw位置控制
+
+  /*副云台控制*/
+	second_gimbal.pitch_contral_data = 0;  //副云台P轴闭环（跟随主云台）（注意符号调节以及控制参数选择）
+	second_gimbal.yaw_contral_data   = 0;  //副云台Y轴闭环（跟随主云台）（注意符号调节以及控制参数选择）
+	
+	/*低通滤波*/
+//	remote_ch3_filt_output = First_Order_Low_Filter(&Gimgimbal_outputbal_Updown_LowFilt_Remote_data , -(Remote_data.RC_ch3-(Pitch_Motor_Data.actual_Position*360/1024))); //Y轴输出量低通滤波  
+//	yaw_filt_output = First_Order_Low_Filter(&Gimbal_Updown_LowFilt_Yaw_Data , gimbal_output[1]); //Y轴输出量低通滤波
+//	pitch_filt_output = First_Order_Low_Filter(&Gimbal_Updown_LowFilt_Pitch_Data , [0]);  //P轴输出量低通滤波
+//  pitch_filt_output = Motion_acceleration_control(&Gimbal_Pitch_acc_limit_Data , gimbal_output[0]); //P轴加速度限制
+	
+	/*打印曲线*/
+	pitch_real_jscope = gimbal_output[0];    //jscope观察曲线变化
+  pitch_set_jscope = (Pitch_Motor_Data.actual_Position*360/1024); 
+	
+//  gimbal_output[1] = yaw_filt_output;	
+//  gimbal_output[0] = pitch_filt_output;	
+}
+
+
+
+/*===============================云台自动瞄准==================================*/
+acceleration_control_type_t    Gimbal_Auto_Yaw_acc_limit_Data  = {0,0,0,0,GIMBAL_AUTO_YAW_ACCELERAD};  //Y轴加速度限制                        
+
+void Gimbal_Auto()
+{
+	if(gimbal_work_mode != 2) //使用云台控制时刷新出来一个角度（防止切换模式角度变化）
+	{ 
+		Gimbal_yaw_angle=0;
+		Last_Gimbal_yaw_angle = yaw_angle;
+		second_gimbal.last_second_yaw_angle = BMI160_Data_Gimbal_second.yaw_angle; //副yaw_angle;
+		gimbal_work_mode = 2;
+	}
+	/*预处理*/
+  Gimbal_yaw_angle = yaw_angle-Last_Gimbal_yaw_angle;                                                         //获取主云台自动打击时的陀螺仪Y轴角度
+	second_gimbal.second_yaw_angle = BMI160_Data_Gimbal_second.yaw_angle - second_gimbal.last_second_yaw_angle; //获取副云台正常工作时的陀螺仪Y轴角度
+	
+   /*云台视觉控制量*/	
+	 Vision_Auto_Data.pitch_control_data = Vision_Auto_Data.auto_pitch_angle*1.7f; //    Vision_Auto_Data.auto_pitch_sum - (Pitch_Motor_Data.actual_Position*360/1024)
+	 Vision_Auto_Data.yaw_control_data   = Vision_Auto_Data.auto_yaw_angle - Vision_Auto_Data.auto_yaw_speed*14;    //auto_yaw_angle_kf第一个参数是kalman出来的yaw的角度，因为电机的控制，所以不用减去陀螺仪的角度，而是直接加上增益
+	 
+   /*主云台输出量闭环处理*/
+	 gimbal_output[1] = Motor_Position_Speed_Control(&GIMBAL_AUTO_S_YAW_PID , &GIMBAL_AUTO_P_YAW_PID , 0 , (-YAW_GYRO_ANGULAR_SPEED) /*Yaw_Motor_Data.speed*/ , (-Vision_Auto_Data.yaw_control_data) , YAW_OUTPUT_LIMIT);//Yaw位置控制
+   gimbal_output[0] = Motor_Position_Speed_Control(&GIMBAL_AUTO_S_PITCH_PID , &GIMBAL_AUTO_P_PITCH_PID , 0 , Pitch_Motor_Data.speed , /*-*/(Vision_Auto_Data.pitch_control_data) , PITCH_OUTPUT_LIMIT); 
+
+  /*副云台手动控制*/
+	second_gimbal.pitch_contral_data = Motor_Position_Speed_Control(&GIMBAL_DOUBLE_S_PITCH_PID , &GIMBAL_DOUBLE_P_PITCH_PID , 0 , BMI160_Data_Gimbal_second.Gyro_Y , -(Remote_data.RC_ch3)*0.1f , 50);                            //副云台P轴闭环（注意符号调节以及控制参数选择）
+	second_gimbal.yaw_contral_data   = Motor_Position_Speed_Control(&GIMBAL_DOUBLE_S_YAW_PID   , &GIMBAL_DOUBLE_P_YAW_PID   , 0 , BMI160_Data_Gimbal_second.Gyro_Z , (-Remote_data.RC_ch2 - second_gimbal.second_yaw_angle) , 50);  //副云台Y轴闭环（跟随主云台）（注意符号调节以及控制参数选择）
+	
+	
+	/*输出算法优化*/
+//	  yaw_filt_output = Motion_acceleration_control(&Gimbal_Auto_Yaw_acc_limit_Data , gimbal_output[1]);
+////// 	yaw_filt_output = First_Order_Low_Filter(&Gimbal_Updown_LowFilt_Yaw_Data , gimbal_output[1]); //Y轴输出量低通滤波
+//   gimbal_output[1] = yaw_filt_output;
+	
+	
+		/*打印曲线*/
+		pitch_real_jscope = -gimbal_output[1];    //jscope观察曲线变化
+		pitch_set_jscope = -GIMBAL_AUTO_P_YAW_PID.SetValue; 
+}
+
+
+/*==================================云台打符模式==============================*/
+void Gimbal_Buff(void) 
+{
+	
+   /*云台视觉控制量*/	
+	 Vision_Auto_Data.pitch_control_data = Vision_Auto_Data.auto_pitch_angle*1.3f; //    Vision_Auto_Data.auto_pitch_sum - (Pitch_Motor_Data.actual_Position*360/1024)
+	 Vision_Auto_Data.yaw_control_data   = Vision_Auto_Data.auto_yaw_angle - Vision_Auto_Data.auto_yaw_speed*14;    //auto_yaw_angle_kf第一个参数是kalman出来的yaw的角度，因为电机的控制，所以不用减去陀螺仪的角度，而是直接加上增益
+	 
+	/*目标丢失处理*/
+//			if((Vision_Auto_Data.auto_pitch_angle==0 && Vision_Auto_Data.auto_yaw_angle==0) && (Vision_Auto_Data.auto_lost_data_flag==0))  //只有当检测到装甲板才跟随，否则归中
+//			{
+//				Vision_Auto_Data.auto_lost_data_count++;
+//			}
+//			else
+//			{
+//				Vision_Auto_Data.auto_lost_data_count=0;
+//				Vision_Auto_Data.auto_lost_data_flag=0;
+//			}
+//			if(Vision_Auto_Data.auto_lost_data_count>=10)
+//			{
+//				Vision_Auto_Data.auto_lost_data_flag=1;
+//				Vision_Auto_Data.auto_lost_data_count=0;
+//			}
+	/*视觉控制量闭环*/		
+//	if(Vision_Auto_Data.auto_lost_data_flag == 1)  //丢失目标，自动归中
+//	{
+//		gimbal_output[0] = Motor_Position_Speed_Control(&GIMBAL_AUTO_S_PITCH_PID , &GIMBAL_AUTO_P_PITCH_PID , 0 , Pitch_Motor_Data.speed , Pitch_Motor_Data.actual_Position , PITCH_OUTPUT_LIMIT); 
+//	}
+//	else
+//	{
+	 gimbal_output[1] = Motor_Position_Speed_Control(&GIMBAL_AUTO_BUFF_S_YAW_PID , &GIMBAL_AUTO_BUFF_P_YAW_PID , 0 , (-YAW_GYRO_ANGULAR_SPEED) /*Yaw_Motor_Data.speed*/ , (-Vision_Auto_Data.yaw_control_data) , YAW_OUTPUT_LIMIT);//Yaw位置控制
+   gimbal_output[0] = Motor_Position_Speed_Control(&GIMBAL_AUTO_BUFF_S_PITCH_PID , &GIMBAL_AUTO_BUFF_P_PITCH_PID , 0 , Pitch_Motor_Data.speed , /*-*/(Vision_Auto_Data.pitch_control_data) , PITCH_OUTPUT_LIMIT); 
+//	}
+
+	
+	/*输出算法优化*/
+//	  yaw_filt_output = Motion_acceleration_control(&Gimbal_Auto_Yaw_acc_limit_Data , gimbal_output[1]);
+////// 	yaw_filt_output = First_Order_Low_Filter(&Gimbal_Updown_LowFilt_Yaw_Data , gimbal_output[1]); //Y轴输出量低通滤波
+//   gimbal_output[1] = yaw_filt_output;
+	
+	
+		/*打印曲线*/
+		pitch_real_jscope = -gimbal_output[1];    //jscope观察曲线变化
+		pitch_set_jscope = -GIMBAL_AUTO_P_YAW_PID.SetValue; 	
+}
+
+
+/*==================================云台无力==================================*/
+void Gimbal_Stop()
+{
+   gimbal_output[0] = 0;  //P
+	 gimbal_output[1] = 0;  //Y
+  
+	second_gimbal.pitch_contral_data = 0;  
+	second_gimbal.yaw_contral_data   = 0;  
+	
+}
+
+
+/******************控制算法************************/
+
+/*
+* 功能：Y轴电机纯速度环控制
+* 输入：Y轴速度目标值
+* 输出：Y轴输出量
+*/
+int16_t Yaw_Speed_Control(float input)
+{
+	int32_t yaw_Speed_Output;
+
+	GIMBAL_S_YAW_PID.SetValue=input;
+	yaw_Speed_Output=YAW_SPEED_OUTPUT_FLAG*Location_Pid_Int32(&GIMBAL_S_YAW_PID,YAW_GYRO_ANGULAR_SPEED);
+	yaw_Speed_Output=limit_int32(yaw_Speed_Output,YAW_OUTPUT_LIMIT,-YAW_OUTPUT_LIMIT);
+	
+	return yaw_Speed_Output;
+}
+
+ 
+/*
+* P轴电机纯速度环控制
+* 输入：P轴速度目标值
+* 输出：P轴输出量
+*/
+int16_t Pitch_Speed_Control(float input)
+{
+	int32_t pitch_Speed_Output;
+
+	GIMBAL_S_PITCH_PID.SetValue=input;
+	pitch_Speed_Output=YAW_SPEED_OUTPUT_FLAG*Location_Pid_Int32(&GIMBAL_S_PITCH_PID,-PITCH_GYRO_ANGULAR_SPEED);
+	pitch_Speed_Output=limit_int32(pitch_Speed_Output,700,-700);
+	
+	return pitch_Speed_Output;
+}
+
+
+
+/*
+* 功能：云台的角度限制
+* 输入：遥控值结构体
+* 输出：无
+* 描述：限制处理后的控制量
+*/
+void Gimbal_Angle_Limit(void)
+{
+	//pitch角度限制
+	Remote_data.RC_ch3 = limit_float(Remote_data.RC_ch3, PITCH_ANGLE_LIMIT_UP, PITCH_ANGLE_LIMIT_DOWN);  
+  //yaw角度限制 
+//	Remote_data.RC_ch2 = limit_float(Remote_data.RC_ch2, YAW_ANGLE_LIMIT, -YAW_ANGLE_LIMIT);
+}
+
+/******************************************/
+
+
+
+/*
+* 功能：Yaw轴电机码盘位置的光电校正
+* 输入：无
+* 输出：无
+* 描述：云台工作过程中运行次程序会调用检测Y中值光电程序，修正Y电机码盘真实值，中间为0
+*/
+static int16_t correctYawValue[5]={0};
+void Correct_Yaw_Zero(void) 
+{
+	u8 i=0;
+	u16 correctSum=0;
+	
+	for(i=0;i<5;i++)
+	{
+		correctYawValue[i-1]=correctYawValue[i];
+	}
+	correctYawValue[4] = !YAW_ZERO_FLAG;//Yaw_Zero_Value();
+	
+	for(i=0;i<5;i++)
+	{
+		correctSum+=correctYawValue[i];
+	}
+	
+	correctSum/=5;
+	
+	if(correctSum==0)
+	{
+		Yaw_Motor_Data.actual_Position=0;
+	}
+}
+
+
+/******************************************/
+
