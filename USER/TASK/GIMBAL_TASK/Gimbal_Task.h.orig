@@ -1,0 +1,35 @@
+#ifndef __GIMBALTASK_H
+#define __GIMBALTASK_H
+
+/*OS控制任务周期以及启动时间*/
+#define GIMBAL_TASK_INIT_TIME 	1
+#define GIMBAL_CONTROL_TIME_MS  2
+
+
+
+/*函数声明*/
+void Gimbal_Task(void *pvParameters);   //云台任务
+void Gimbal_Control(void);              //云台控制
+void Correct_Yaw_Zero(void);            //Y轴光电校准
+
+
+//////云台行为
+void Gimbal_Init(void);
+  void Yaw_Init(void);
+	void Pitch_Init(void);
+void Gimbal_Auto(void);
+void Gimbal_Buff(void);
+void Gimbal_Independent(void);
+void Gimbal_Supply(void);
+void Gimbal_Work(void);
+void Gimbal_Stop(void);
+
+/////控制算法
+int16_t Yaw_Speed_Control(float input);            //输入速度控制量，速度环控制yaw轴
+int16_t Pitch_Speed_Control(float input);          //输入速度控制量，速度环控制pitch轴
+void Gimbal_Angle_Limit(void);                     //云台角度限制
+
+          
+
+
+#endif

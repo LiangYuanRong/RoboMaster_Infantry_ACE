@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<JScopeProject>
+    <FileVersion major="1" minor="1" />
+    <Project>
+        <Configuration>
+            <JLink>
+                <Options Connection="1" IsRTTSession="0" IsRTTWithTimeStamp="1" SamplingPeriod="100" SerialNo="0" JTAG_IRPre="-1" JTAG_DRPre="-1" IP="" TargetDevice="STM32F103C8" TargetInterface="SWD" InterfaceSpeed="4000" />
+            </JLink>
+            <ElfFile Name="C:\Users\86182\Desktop\2020步兵机器人\代码\INFANTRY_407（3.0）（疫情期间完善版本）\PROJECT\Objects\INFANTRY_2020_407.axf" />
+            <DataFile Name="" />
+            <RawFile Name="" />
+            <Scope>
+                <Options TimeResolutionUs="500000" />
+            </Scope>
+        </Configuration>
+        <Windows>
+            <Graph Show="1" />
+            <Watch Show="1" />
+        </Windows>
+        <SelectedSymbols>
+            <Symbol>
+                <Options Name="Chassis_ch0" Address="0x200001D8" Type="float" TypeID="1" Size="4" GraphColorRed="102" GraphColorGreen="102" GraphColorBlue="178" YMinSampled="0" YMaxSampled="0" YAvgSampled="0" Offset="4" ShowInGraph="0" ACCoupling="0" YOffset="200" IsAutoConfig="1" YResolution="1" MaxValue="1" File="..\USER\TASK\CHASSIS_TASK\Chassis_Task.c" Scope="1" DrawStyle="0" />
+            </Symbol>
+            <Symbol>
+                <Options Name="chassis_ch0_jscope" Address="0x20000212" Type="short" TypeID="11" Size="2" GraphColorRed="160" GraphColorGreen="32" GraphColorBlue="240" YMinSampled="0" YMaxSampled="0" YAvgSampled="0" Offset="8" ShowInGraph="0" ACCoupling="0" YOffset="200" IsAutoConfig="1" YResolution="1" MaxValue="1" File="..\USER\TASK\CHASSIS_TASK\Chassis_Task.c" Scope="0" DrawStyle="0" />
+            </Symbol>
+            <Symbol>
+                <Options Name="Chassis_ch1" Address="0x200001DC" Type="float" TypeID="1" Size="4" GraphColorRed="255" GraphColorGreen="0" GraphColorBlue="0" YMinSampled="0" YMaxSampled="0" YAvgSampled="0" Offset="10" ShowInGraph="0" ACCoupling="0" YOffset="200" IsAutoConfig="1" YResolution="1" MaxValue="2" File="..\USER\TASK\CHASSIS_TASK\Chassis_Task.c" Scope="1" DrawStyle="0" />
+            </Symbol>
+            <Symbol>
+                <Options Name="chassis_ch1_jscope" Address="0x20000214" Type="short" TypeID="11" Size="2" GraphColorRed="0" GraphColorGreen="191" GraphColorBlue="255" YMinSampled="-391" YMaxSampled="536" YAvgSampled="6" Offset="14" ShowInGraph="1" ACCoupling="0" YOffset="200" IsAutoConfig="1" YResolution="500" MaxValue="1000" File="..\USER\TASK\CHASSIS_TASK\Chassis_Task.c" Scope="0" DrawStyle="0" />
+            </Symbol>
+        </SelectedSymbols>
+    </Project>
+</JScopeProject>

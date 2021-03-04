@@ -1,0 +1,21 @@
+#ifndef __CHASSISTASK_H
+#define __CHASSISTASK_H
+
+/*OS控制任务周期以及启动时间*/
+#define CHASSIS_TASK_INIT_TIME 	5
+#define CHASSIS_CONTROL_TIME_MS 2
+
+
+/*函数声明*/
+void Chassis_Task(void *pvParameters);
+void Chassis_control(void);
+void Chassis_Follow(void);
+void Chassis_Twist(void);
+void Chassis_Rotation(void);
+void Chassis_Independent(void);
+void Chassis_Input(int16_t ch0, int16_t ch1, int16_t ch2);
+void Chassis_accelerated_Control(int16_t *ch0,int16_t *ch1,int16_t *ch2);				
+void Chassis_to_Gimbal(void);            //底盘发数据到云台
+
+
+#endif
